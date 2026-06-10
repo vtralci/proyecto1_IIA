@@ -1,0 +1,878 @@
+---
+title: "Descriptive Analysis – Real Estate Properties"
+author: "Vicente Emilio Tralci Sindoni"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 10, fig.height = 5)
+```
+
+# Package Setup
+
+```{r packages}
+pkgs <- c("tidyverse", "skimr", "corrplot", "clickR",
+          "ggplot2", "scales", "knitr", "kableExtra", "effectsize")
+for (p in pkgs) if (!require(p, character.only = TRUE)) install.packages(p)
+
+library(tidyverse); library(skimr); library(corrplot); library(clickR)
+library(ggplot2);   library(scales); library(knitr);   library(kableExtra)
+library(effectsize)
+```
+
+# Load Data
+
+```{r load-data}
+df <- read_csv("/Users/vets/projects/upv/1.2/pr1/proyecto1_IIA/data/trainData.csv")
+
+cat("Rows:", nrow(df), "\n")
+cat("Columns:", ncol(df), "\n")
+glimpse(df)
+```
+
+```{r derive-geo-vars}
+# ── French département/région maps ────────────────────────────────────────────
+REGION_MAP <- list(
+  "Auvergne-Rhône-Alpes"          = c("01","03","07","15","26","38","42","43","63","69","73","74"),
+  "Bourgogne-Franche-Comté"       = c("21","25","39","58","70","71","89","90"),
+  "Bretagne"                      = c("22","29","35","56"),
+  "Centre-Val de Loire"           = c("18","28","36","37","41","45"),
+  "Corse"                         = c("20"),
+  "Grand Est"                     = c("08","10","51","52","54","55","57","67","68","88"),
+  "Hauts-de-France"               = c("02","59","60","62","80"),
+  "Île-de-France"                 = c("75","77","78","91","92","93","94","95"),
+  "Normandie"                     = c("14","27","50","61","76"),
+  "Nouvelle-Aquitaine"            = c("16","17","19","23","24","33","40","47","64","79","86","87"),
+  "Occitanie"                     = c("09","11","12","30","31","32","34","46","48","65","66","81","82"),
+  "Pays de la Loire"              = c("44","49","53","72","85"),
+  "Provence-Alpes-Côte d'Azur"   = c("04","05","06","13","83","84")
+)
+
+# Flatten to named vector: dept_code → region_name
+region_lookup <- setNames(
+  rep(names(REGION_MAP), lengths(REGION_MAP)),
+  unlist(REGION_MAP)
+)
+
+# Derive department and region on df itself (available to all downstream chunks)
+df <- df %>%
+  mutate(
+    department = str_sub(as.character(postal_code), 1, 2),
+    department = if_else(str_to_upper(department) %in% c("2A","2B"),
+                         str_to_upper(department), department),
+    region     = region_lookup[department],
+    region     = if_else(is.na(region), "unknown", region)
+  )
+
+cat("department — unique values:", n_distinct(df$department, na.rm = TRUE), "\n")
+cat("region     — unique values:", n_distinct(df$region,     na.rm = TRUE), "\n")
+```
+---
+
+# Dataset Overview
+
+## Full Skimr Summary
+
+```{r skim}
+skim(df)
+```
+
+## clickR Descriptive
+
+```{r descriptive}
+descriptive(df)
+```
+
+---
+
+# Variable Types
+
+```{r var-types}
+var_types <- data.frame(
+  Variable  = names(df),
+  Type      = sapply(df, function(x) class(x)),
+  row.names = NULL
+)
+
+var_types %>%
+  kable(caption = "Variable types in the dataset") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"), full_width = FALSE)
+```
+
+---
+
+# Unique Value Counts
+
+```{r unique-counts}
+unique_counts <- df %>%
+  summarise(across(everything(), ~ n_distinct(.x, na.rm = TRUE))) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "Unique_Values") %>%
+  arrange(desc(Unique_Values))
+
+unique_counts %>%
+  kable(caption = "Number of unique values per variable") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"), full_width = FALSE)
+```
+
+---
+
+# Categorical Variables
+
+## Count per Category
+
+```{r cat-vars}
+cat_vars      <- df %>% select(where(~ is.character(.x) | is.factor(.x)))
+cat_var_names <- names(cat_vars)
+
+if (length(cat_var_names) == 0) cat("No categorical variables detected.\n") else
+  cat("Categorical variables:", paste(cat_var_names, collapse = ", "), "\n")
+```
+
+```{r cat-freq-tables}
+for (var in cat_var_names) {
+  cat("\n\n### Frequency table:", var, "\n\n")
+  freq_tbl <- df %>%
+    count(.data[[var]], name = "Count") %>%
+    arrange(desc(Count)) %>%
+    mutate(Proportion = percent(Count / sum(Count), accuracy = 0.1))
+  print(
+    freq_tbl %>%
+      kable(caption = paste("Frequency table:", var)) %>%
+      kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE)
+  )
+}
+```
+
+## Bar Charts per Categorical Variable
+
+```{r cat-bar-charts, fig.height=5}
+for (var in cat_var_names) {
+  freq_data <- df %>%
+    count(.data[[var]], name = "Count") %>%
+    arrange(desc(Count)) %>%
+    mutate(!!var := fct_reorder(.data[[var]], Count, .desc = TRUE))
+
+  print(arrange(freq_data, Count), n = 100)
+
+  p <- ggplot(freq_data, aes(x = .data[[var]], y = Count, fill = Count)) +
+    geom_col(show.legend = FALSE) +
+    geom_text(aes(label = Count), vjust = -0.4, size = 3.2) +
+    scale_fill_gradient(low = "#a8c8e8", high = "#1a5fa8") +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+    labs(title = paste("Count by", var), x = var, y = "Count") +
+    theme_minimal(base_size = 12) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  print(p)
+}
+```
+
+---
+
+# Numerical Variables
+
+## Summary Statistics
+
+```{r num-summary}
+num_vars <- df %>% select(where(is.numeric))
+
+num_summary <- num_vars %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "Value") %>%
+  group_by(Variable) %>%
+  summarise(
+    N      = sum(!is.na(Value)),
+    Mean   = round(mean(Value,   na.rm = TRUE), 2),
+    Median = round(median(Value, na.rm = TRUE), 2),
+    SD     = round(sd(Value,     na.rm = TRUE), 2),
+    Min    = round(min(Value,    na.rm = TRUE), 2),
+    Max    = round(max(Value,    na.rm = TRUE), 2),
+    IQR    = round(IQR(Value,    na.rm = TRUE), 2)
+  ) %>%
+  arrange(Variable)
+
+num_summary %>%
+  kable(caption = "Numerical variable summary statistics") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"), full_width = FALSE)
+```
+
+---
+
+# Missing Values
+
+## Missing Count and Percentage per Variable
+
+```{r missing-values}
+missing_df <- df %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "Missing") %>%
+  mutate(Total = nrow(df), Pct_Missing = round(Missing / Total * 100, 2)) %>%
+  arrange(desc(Missing))          # ← removed filter(Missing > 0)
+
+if (nrow(missing_df) == 0) cat("No missing values found.\n") else
+  missing_df %>%
+    kable(caption = "Missing values per variable") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+```
+
+## Missing Values Bar Chart
+
+```{r missing-chart}
+if (nrow(missing_df) > 0) {
+  ggplot(
+    missing_df %>% mutate(Variable = fct_reorder(Variable, Pct_Missing, .desc = TRUE)),
+    aes(x = Variable, y = Pct_Missing, fill = Pct_Missing)
+  ) +
+    geom_col(show.legend = FALSE) +
+    geom_text(aes(label = paste0(Pct_Missing, "%")), vjust = -0.4, size = 3.2) +
+    scale_fill_gradient(low = "#f7c59f", high = "#e05c1a") +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1)),
+                       labels = function(x) paste0(x, "%")) +
+    labs(title = "Percentage of Missing Values by Variable",
+         x = "Variable", y = "% Missing") +
+    theme_minimal(base_size = 12) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+}
+```
+
+---
+
+# Price Distribution
+
+```{r price-dist}
+price_col <- "price"
+
+if (price_col %in% names(df)) {
+  price_data <- df %>% filter(!is.na(.data[[price_col]]))
+  med_val    <- median(price_data[[price_col]], na.rm = TRUE)
+  mean_val   <- mean(price_data[[price_col]],   na.rm = TRUE)
+
+  ggplot(price_data, aes(x = .data[[price_col]])) +
+    geom_histogram(bins = 50, fill = "#1a5fa8", colour = "white", alpha = 0.85) +
+    geom_vline(xintercept = med_val,  colour = "#e05c1a", linetype = "dashed", linewidth = 0.9) +
+    geom_vline(xintercept = mean_val, colour = "#2ca02c", linetype = "dashed", linewidth = 0.9) +
+    annotate("text", x = med_val,  y = Inf,
+             label = paste("Median:", comma(med_val)),
+             vjust = 1.5, hjust = -0.05, colour = "#e05c1a", size = 3.5) +
+    annotate("text", x = mean_val, y = Inf,
+             label = paste("Mean:", comma(mean_val)),
+             vjust = 3, hjust = -0.05, colour = "#2ca02c", size = 3.5) +
+    scale_x_continuous(labels = comma) +
+    labs(title = paste("Distribution of", price_col), x = price_col, y = "Count") +
+    theme_minimal(base_size = 12)
+}
+```
+
+```{r price-boxplot}
+if (price_col %in% names(df)) {
+  ggplot(df %>% filter(!is.na(.data[[price_col]])),
+         aes(y = .data[[price_col]])) +
+    geom_boxplot(fill = "#a8c8e8", colour = "#1a5fa8",
+                 outlier.colour = "#e05c1a", outlier.alpha = 0.4, width = 0.4) +
+    scale_y_continuous(labels = comma) +
+    labs(title = paste("Boxplot of", price_col), y = price_col) +
+    theme_minimal(base_size = 12) +
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+}
+```
+
+```{r price-log}
+if (price_col %in% names(df)) {
+  ggplot(df %>% filter(!is.na(.data[[price_col]]), .data[[price_col]] > 0),
+         aes(x = .data[[price_col]])) +
+    geom_histogram(bins = 50, fill = "#6a3fa8", colour = "white", alpha = 0.85) +
+    scale_x_log10(labels = comma) +
+    labs(title = paste("Distribution of", price_col, "(log10 scale)"),
+         x = paste0("log10(", price_col, ")"), y = "Count") +
+    theme_minimal(base_size = 12)
+}
+```
+
+---
+
+# City Analysis
+
+```{r city-config}
+city_col  <- "city"
+top_n_val <- 20
+```
+
+## Top Cities by Listings
+
+```{r city-listings}
+if (city_col %in% names(df)) {
+  city_counts <- df %>%
+    count(.data[[city_col]], name = "Listings") %>%
+    arrange(desc(Listings)) %>%
+    slice_head(n = top_n_val) %>%
+    mutate(!!city_col := fct_reorder(.data[[city_col]], Listings, .desc = TRUE))
+
+  ggplot(city_counts, aes(x = .data[[city_col]], y = Listings, fill = Listings)) +
+    geom_col(show.legend = FALSE) +
+    geom_text(aes(label = comma(Listings)), vjust = -0.4, size = 3) +
+    scale_fill_gradient(low = "#a8c8e8", high = "#1a5fa8") +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1)), labels = comma) +
+    labs(title = paste("Top", top_n_val, "Cities by Number of Listings"),
+         x = "City", y = "Listings") +
+    theme_minimal(base_size = 12) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+}
+```
+```{r fn-cities-per-dept}
+# ── Reusable helper ───────────────────────────────────────────────────────────
+# Returns a tibble with department, listing count, and cities.
+# Args:
+#   data        : the main data frame
+#   postal_col  : name of the postal code column (string)
+#   city_col    : name of the city column (string)
+#   min_listings: if set, filters to departments with FEWER than this value
+# Usage examples:
+#   cities_per_dept(df)
+#   cities_per_dept(df, min_listings = 30)
+#   cities_per_dept(df, postal_col = "zip", city_col = "municipality")
+
+cities_per_dept <- function(data,
+                            postal_col   = "postal_code",
+                            city_col     = "city",
+                            min_listings = NULL) {
+
+  # Validate columns
+  missing_cols <- setdiff(c(postal_col, city_col), names(data))
+  if (length(missing_cols) > 0) {
+    stop("Column(s) not found in data: ", paste(missing_cols, collapse = ", "))
+  }
+
+  result <- data %>%
+    mutate(department = str_sub(as.character(.data[[postal_col]]), 1, 2)) %>%
+    group_by(department) %>%
+    summarise(
+      Listings = n(),
+      N_Cities = n_distinct(.data[[city_col]], na.rm = TRUE),
+      Cities   = paste(sort(unique(na.omit(.data[[city_col]]))), collapse = ", "),
+      .groups  = "drop"
+    ) %>%
+    arrange(Listings)
+
+  if (!is.null(min_listings)) {
+    result <- result %>% filter(Listings < min_listings)
+  }
+
+  result
+}
+
+```
+
+```{r dept-all}
+cities_per_dept(df) %>%
+  arrange(desc(Listings)) %>%
+  kable(caption = "Cities per Department") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+```
+
+## ⚑ Cities with Fewer than 30 Listings
+
+These cities have sparse representation and may need grouping or exclusion before modelling.
+
+```{r city-sparse}
+if (city_col %in% names(df)) {
+  sparse_cities <- df %>%
+    count(.data[[city_col]], name = "Listings") %>%
+    filter(Listings < 30) %>%
+    arrange(Listings)
+
+  cat("Cities with fewer than 30 listings:", nrow(sparse_cities), "\n")
+  cat("Total listings in those cities:", sum(sparse_cities$Listings), "\n")
+  cat("City names:", paste(sparse_cities[[city_col]], collapse = ", "), "\n")
+
+  sparse_cities %>%
+    kable(caption = "Cities with fewer than 30 listings") %>%
+    kable_styling(bootstrap_options = c("striped","hover","condensed"), full_width = FALSE)
+
+  ggplot(sparse_cities %>%
+           mutate(!!city_col := fct_reorder(.data[[city_col]], Listings)),
+         aes(x = .data[[city_col]], y = Listings, fill = Listings)) +
+    geom_col(show.legend = FALSE) +
+    geom_text(aes(label = Listings), hjust = -0.2, size = 3) +
+    scale_fill_gradient(low = "#f7c59f", high = "#e05c1a") +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+    coord_flip() +
+    labs(title = "Cities with Fewer than 30 Listings",
+         x = "City", y = "Listings") +
+    theme_minimal(base_size = 11)
+}
+```
+
+## Median Price per City (Top Cities)
+
+```{r city-price}
+if (city_col %in% names(df) && price_col %in% names(df)) {
+  city_price <- df %>%
+    filter(!is.na(.data[[price_col]]), !is.na(.data[[city_col]])) %>%
+    group_by(.data[[city_col]]) %>%
+    summarise(
+      Median_Price = median(.data[[price_col]], na.rm = TRUE),
+      Mean_Price   = mean(.data[[price_col]],   na.rm = TRUE),
+      Listings     = n()
+    ) %>%
+    arrange(desc(Median_Price)) %>%
+    slice_head(n = top_n_val) %>%
+    mutate(!!city_col := fct_reorder(.data[[city_col]], Median_Price, .desc = TRUE))
+
+  ggplot(city_price, aes(x = .data[[city_col]], y = Median_Price, fill = Median_Price)) +
+    geom_col(show.legend = FALSE) +
+    geom_text(aes(label = comma(round(Median_Price))), vjust = -0.4, size = 3) +
+    scale_fill_gradient(low = "#a8c8e8", high = "#1a5fa8") +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1)), labels = comma) +
+    labs(title = paste("Top", top_n_val, "Cities by Median Listing Price"),
+         x = "City", y = "Median Price") +
+    theme_minimal(base_size = 12) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+}
+```
+
+---
+
+# Department Analysis (Postal Code)
+
+Departments are identified by the **first two digits** of `postal_code`. [web:16]
+
+## Listings per Department
+
+```{r dept-listings}
+postal_col <- "postal_code"   # adjust if needed
+
+if (postal_col %in% names(df)) {
+  # Build department column
+  df_dept <- df %>%
+    mutate(department = str_sub(as.character(.data[[postal_col]]), 1, 2))
+
+  dept_counts <- df_dept %>%
+    count(department, name = "Listings") %>%
+    arrange(desc(Listings)) %>%
+    mutate(department = fct_reorder(department, Listings, .desc = TRUE))
+
+  # ── Sparse departments (<30): names + their cities ──────────────────────────
+  sparse_depts <- dept_counts %>%
+    filter(Listings < 30) %>%
+    arrange(Listings)
+
+  cat("Departments with fewer than 30 listings:", nrow(sparse_depts), "\n")
+  cat("Department codes:", paste(sparse_depts$department, collapse = ", "), "\n\n")
+
+  if (nrow(sparse_depts) > 0) {
+    # For each sparse department, list its cities
+    sparse_dept_cities <- df_dept %>%
+      filter(department %in% sparse_depts$department) %>%
+      group_by(department) %>%
+      summarise(
+        Listings = n(),
+        Cities   = paste(sort(unique(.data[[city_col]])), collapse = ", ")
+      ) %>%
+      arrange(Listings)
+
+    cat("Cities per sparse department:\n")
+    for (i in seq_len(nrow(sparse_dept_cities))) {
+      cat(sprintf("  [%s] (%d listings): %s\n",
+                  sparse_dept_cities$department[i],
+                  sparse_dept_cities$Listings[i],
+                  sparse_dept_cities$Cities[i]))
+    }
+    cat("\n")
+
+    # Formatted table
+    sparse_dept_cities %>%
+      kable(caption = "Departments with fewer than 30 listings and their cities") %>%
+      kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+  }
+  # ────────────────────────────────────────────────────────────────────────────
+
+  # Full listing-count table for all departments
+  dept_counts %>%
+    kable(caption = "Listings per Department (first two digits of postal code)") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+
+  # Bar chart — all departments
+  ggplot(dept_counts, aes(x = department, y = Listings, fill = Listings)) +
+    geom_col(show.legend = FALSE) +
+    geom_text(aes(label = comma(Listings)), vjust = -0.4, size = 3) +
+    scale_fill_gradient(low = "#a8c8e8", high = "#1a5fa8") +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1)), labels = comma) +
+    labs(title = "Number of Listings per Department",
+         x = "Department Code", y = "Listings") +
+    theme_minimal(base_size = 12) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+} else {
+  cat("Column '", postal_col, "' not found. Update postal_col above.\n")
+}
+```
+
+## Median Price per Department
+
+```{r dept-price}
+if (postal_col %in% names(df) && price_col %in% names(df)) {
+  dept_price <- df %>%
+    mutate(department = str_sub(as.character(.data[[postal_col]]), 1, 2)) %>%
+    filter(!is.na(.data[[price_col]])) %>%
+    group_by(department) %>%
+    summarise(
+      Median_Price = median(.data[[price_col]], na.rm = TRUE),
+      Mean_Price   = mean(.data[[price_col]],   na.rm = TRUE),
+      Listings     = n()
+    ) %>%
+    arrange(desc(Median_Price)) %>%
+    mutate(department = fct_reorder(department, Median_Price, .desc = TRUE))
+
+  ggplot(dept_price, aes(x = department, y = Median_Price, fill = Median_Price)) +
+    geom_col(show.legend = FALSE) +
+    geom_text(aes(label = comma(round(Median_Price))), vjust = -0.4, size = 3) +
+    scale_fill_gradient(low = "#a8c8e8", high = "#1a5fa8") +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1)), labels = comma) +
+    labs(title = "Median Listing Price per Department",
+         x = "Department Code", y = "Median Price") +
+    theme_minimal(base_size = 12) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+}
+```
+```{r region-analysis}
+# ── Listings per region ───────────────────────────────────────────────────────
+region_counts <- df %>%
+  filter(region != "unknown") %>%
+  count(region, name = "Listings") %>%
+  arrange(desc(Listings)) %>%
+  mutate(region = fct_reorder(region, Listings, .desc = TRUE))
+
+ggplot(region_counts, aes(x = region, y = Listings, fill = Listings)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = comma(Listings)), vjust = -0.4, size = 3) +
+  scale_fill_gradient(low = "#a8c8e8", high = "#1a5fa8") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)), labels = comma) +
+  labs(title = "Number of Listings per Region", x = "Region", y = "Listings") +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# ── Median price per region ───────────────────────────────────────────────────
+region_price <- df %>%
+  filter(region != "unknown", !is.na(price)) %>%
+  group_by(region) %>%
+  summarise(
+    Median_Price = median(price, na.rm = TRUE),
+    Mean_Price   = mean(price,   na.rm = TRUE),
+    Listings     = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(Median_Price)) %>%
+  mutate(region = fct_reorder(region, Median_Price, .desc = TRUE))
+
+ggplot(region_price, aes(x = region, y = Median_Price, fill = Median_Price)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = comma(round(Median_Price))), vjust = -0.4, size = 3) +
+  scale_fill_gradient(low = "#a8c8e8", high = "#1a5fa8") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)), labels = comma) +
+  labs(title = "Median Listing Price per Region", x = "Region", y = "Median Price") +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r dept-sparse}
+sparse <- cities_per_dept(df, min_listings = 30)
+
+cat("Departments with fewer than 30 listings:", nrow(sparse), "\n")
+cat("Department codes:", paste(sparse$department, collapse = ", "), "\n\n")
+
+for (i in seq_len(nrow(sparse))) {
+  cat(sprintf("  [%s] (%d listings, %d cities): %s\n",
+              sparse$department[i],
+              sparse$Listings[i],
+              sparse$N_Cities[i],
+              sparse$Cities[i]))
+}
+
+sparse %>%
+  kable(caption = "Sparse Departments (< 30 listings) with their Cities") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(seq_len(nrow(sparse)), background = "#fff3cd")
+```
+
+---
+
+# Property Type Analysis
+
+## ⚑ Property Types with Fewer than 30 Listings
+
+```{r proptype-sparse}
+# ── config ────────────────────────────────────────────────────────────────────
+prop_col <- "property_type"   # adjust to your actual column name
+# ─────────────────────────────────────────────────────────────────────────────
+
+if (prop_col %in% names(df)) {
+  proptype_counts <- df %>%
+    count(.data[[prop_col]], name = "Listings") %>%
+    arrange(Listings)
+
+  sparse_proptypes <- proptype_counts %>% filter(Listings < 30)
+
+  cat("Property types with fewer than 30 listings:", nrow(sparse_proptypes), "\n")
+  cat("Property type names:", paste(sparse_proptypes[[prop_col]], collapse = ", "), "\n")
+
+  proptype_counts %>%
+    mutate(Sparse = ifelse(Listings < 30, "< 30", "≥ 30")) %>%
+    kable(caption = "Listings per Property Type (flagged if < 30)") %>%
+    kable_styling(bootstrap_options = c("striped","hover","condensed"), full_width = FALSE) %>%
+    row_spec(which(proptype_counts$Listings < 30), background = "#fff3cd")
+
+  if (nrow(sparse_proptypes) > 0) {
+    ggplot(proptype_counts %>%
+             mutate(!!prop_col := fct_reorder(.data[[prop_col]], Listings),
+                    Sparse = ifelse(Listings < 30, "< 30", "≥ 30")),
+           aes(x = .data[[prop_col]], y = Listings, fill = Sparse)) +
+      geom_col() +
+      geom_hline(yintercept = 30, linetype = "dashed",
+                 colour = "#e05c1a", linewidth = 0.8) +
+      geom_text(aes(label = Listings), hjust = -0.2, size = 3.2) +
+      scale_fill_manual(values = c("< 30" = "#e05c1a", "≥ 30" = "#1a5fa8")) +
+      scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+      coord_flip() +
+      labs(title = "Listings per Property Type (dashed = 30-listing threshold)",
+           x = "Property Type", y = "Listings", fill = "Count category") +
+      theme_minimal(base_size = 12)
+  }
+} else {
+  cat("Column '", prop_col, "' not found. Update prop_col above.\n")
+}
+```
+
+---
+
+# Price vs Variables
+
+```{r fn-plot-price-vs-var}
+# ══════════════════════════════════════════════════════════════════════════════
+# plot_price_vs_var()
+#
+# Plots both price and log(price) against a single predictor variable.
+# Automatically detects whether the predictor is numeric or categorical and
+# selects the appropriate chart type:
+#
+#   Numeric predictor  → scatter plot with a loess smooth (price) and
+#                        log10(price) on the y-axis for the second panel
+#   Categorical predictor → boxplots of price and log10(price) per level,
+#                           levels ordered by median price (descending),
+#                           with n-labels on top of each box
+#
+# Args:
+#   data         : data frame containing the data
+#   var          : predictor column name (string)
+#   price_col    : name of the price column (default "price")
+#   top_n        : for categorical vars with many levels, show only the top_n
+#                  levels by median price (NULL = show all)
+#   point_alpha  : transparency for scatter points (default 0.25)
+#   point_size   : size of scatter points (default 0.8)
+#   color_raw    : fill/colour for the price panel (default "#1a5fa8")
+#   color_log    : fill/colour for the log(price) panel (default "#6a3fa8")
+#
+# Returns: invisibly, a named list with elements $raw and $log (ggplot objects)
+#
+# Usage:
+#   plot_price_vs_var(df, "surface")
+#   plot_price_vs_var(df, "property_type", top_n = 15)
+#   plot_price_vs_var(df, "rooms", color_raw = "#2ca02c")
+# ══════════════════════════════════════════════════════════════════════════════
+
+plot_price_vs_var <- function(data,
+                              var,
+                              price_col   = "price",
+                              top_n       = NULL,
+                              min_n       = 30,       # drop categorical levels with fewer listings
+                              point_alpha = 0.25,
+                              point_size  = 0.8,
+                              color_raw   = "#1a5fa8",
+                              color_log   = "#6a3fa8") {
+
+  # ── Validate inputs ──────────────────────────────────────────────────────────
+  missing_cols <- setdiff(c(var, price_col), names(data))
+  if (length(missing_cols) > 0)
+    stop("Column(s) not found in data: ", paste(missing_cols, collapse = ", "))
+
+  # ── Working data: drop NA price and zero/negative prices for log scale ───────
+  d <- data %>%
+    filter(!is.na(.data[[price_col]]), .data[[price_col]] > 0,
+           !is.na(.data[[var]]))
+
+  is_numeric_var <- is.numeric(d[[var]])
+
+  # ── NUMERIC predictor ────────────────────────────────────────────────────────
+  if (is_numeric_var) {
+
+    p_raw <- ggplot(d, aes(x = .data[[var]], y = .data[[price_col]])) +
+      geom_point(alpha = point_alpha, size = point_size, colour = color_raw) +
+      geom_smooth(method = "loess", formula = y ~ x,
+                  colour = "#e05c1a", fill = "#f7c59f", linewidth = 0.9) +
+      scale_y_continuous(labels = comma) +
+      labs(
+        title = paste("Price vs", var),
+        x     = var,
+        y     = "Price"
+      ) +
+      theme_minimal(base_size = 12)
+
+    p_log <- ggplot(d, aes(x = .data[[var]], y = .data[[price_col]])) +
+      geom_point(alpha = point_alpha, size = point_size, colour = color_log) +
+      geom_smooth(method = "loess", formula = y ~ x,
+                  colour = "#e05c1a", fill = "#f7c59f", linewidth = 0.9) +
+      scale_y_log10(labels = comma) +
+      labs(
+        title = paste("log10(Price) vs", var),
+        x     = var,
+        y     = "log10(Price)"
+      ) +
+      theme_minimal(base_size = 12)
+
+  # ── CATEGORICAL predictor ────────────────────────────────────────────────────
+  } else {
+
+    # Order levels by median price; drop sparse levels; optionally keep only top_n
+    level_order <- d %>%
+      group_by(.data[[var]]) %>%
+      summarise(med = median(.data[[price_col]], na.rm = TRUE),
+                n   = n(),
+                .groups = "drop") %>%
+      filter(n >= min_n) %>%          # ← drop levels below the min_n threshold
+      arrange(desc(med))
+
+    if (nrow(level_order) == 0) {
+      message("plot_price_vs_var: no levels of '", var,
+              "' have >= ", min_n, " listings — skipping.")
+      return(invisible(NULL))
+    }
+
+    if (!is.null(top_n)) level_order <- slice_head(level_order, n = top_n)
+
+    d <- d %>% filter(.data[[var]] %in% level_order[[var]]) %>%
+      mutate(!!var := factor(.data[[var]], levels = level_order[[var]]))
+
+    # n-labels (counts per level)
+    n_labels <- d %>%
+      count(.data[[var]]) %>%
+      rename(n_count = n)
+
+    # Build subtitle noting any dropped sparse levels
+    n_dropped  <- n_distinct(d[[var]]) - nrow(level_order)
+    sparse_note <- if (n_dropped > 0)
+      paste0(" [", n_dropped, " level(s) with <", min_n, " listings hidden]") else ""
+
+    p_raw <- ggplot(d, aes(x = .data[[var]], y = .data[[price_col]])) +
+      geom_boxplot(fill = color_raw, colour = "#333333",
+                   outlier.colour = "#e05c1a", outlier.alpha = 0.3,
+                   outlier.size = 0.7) +
+      geom_text(data = n_labels,
+                aes(x = .data[[var]], y = Inf,
+                    label = paste0("n=", comma(n_count))),
+                vjust = 1.4, size = 2.8, inherit.aes = FALSE) +
+      scale_y_continuous(labels = comma) +
+      labs(
+        title = paste0("Price by ", var,
+                       if (!is.null(top_n)) paste0(" (top ", top_n, " levels)") else "",
+                       sparse_note),
+        x = var,
+        y = "Price"
+      ) +
+      theme_minimal(base_size = 12) +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+    p_log <- ggplot(d, aes(x = .data[[var]], y = .data[[price_col]])) +
+      geom_boxplot(fill = color_log, colour = "#333333",
+                   outlier.colour = "#e05c1a", outlier.alpha = 0.3,
+                   outlier.size = 0.7) +
+      geom_text(data = n_labels,
+                aes(x = .data[[var]], y = Inf,
+                    label = paste0("n=", comma(n_count))),
+                vjust = 1.4, size = 2.8, inherit.aes = FALSE) +
+      scale_y_log10(labels = comma) +
+      labs(
+        title = paste0("log10(Price) by ", var,
+                       if (!is.null(top_n)) paste0(" (top ", top_n, " levels)") else "",
+                       sparse_note),
+        x = var,
+        y = "log10(Price)"
+      ) +
+      theme_minimal(base_size = 12) +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  }
+
+  print(p_raw)
+  print(p_log)
+  invisible(list(raw = p_raw, log = p_log))
+}
+```
+
+## Price vs All Variables
+
+```{r price-vs-all-vars, fig.height=5}
+# ── Config ────────────────────────────────────────────────────────────────────
+# Variables to skip (the target itself and any IDs / high-cardinality text)
+skip_vars <- c(price_col, "id_annonce", "postal_code", "department", "region")
+
+# For categorical variables with many levels, show only the top N by median price
+cat_top_n <- 20
+
+# Categorical levels with fewer than this many listings are excluded from plots
+cat_min_n <- 30
+# ─────────────────────────────────────────────────────────────────────────────
+
+vars_to_plot <- setdiff(names(df), skip_vars)
+
+for (v in vars_to_plot) {
+  cat("\n\n---\n\n## Price vs `", v, "`\n\n", sep = "")
+
+  # Determine top_n: apply only for categorical with > cat_top_n distinct levels
+  is_cat  <- is.character(df[[v]]) || is.factor(df[[v]])
+  n_lvls  <- n_distinct(df[[v]], na.rm = TRUE)
+  use_top <- if (is_cat && n_lvls > cat_top_n) cat_top_n else NULL
+
+  plot_price_vs_var(df, var = v, price_col = price_col,
+                    top_n = use_top, min_n = cat_min_n)
+}
+```
+
+---
+
+```{r corrplot, fig.width=10, fig.height=10}
+# Encode department and region as their median price (numeric proxy for correlation)
+dept_median  <- df %>% group_by(department) %>%
+  summarise(dept_median_price  = median(price, na.rm = TRUE), .groups = "drop")
+region_median <- df %>% group_by(region) %>%
+  summarise(region_median_price = median(price, na.rm = TRUE), .groups = "drop")
+
+df_cor <- df %>%
+  left_join(dept_median,   by = "department") %>%
+  left_join(region_median, by = "region")     %>%
+  select(where(is.numeric))   # now includes dept_median_price + region_median_price
+
+cor_matrix <- cor(df_cor, use = "complete.obs")
+
+corrplot(
+  cor_matrix,
+  method      = "color",
+  type        = "upper",
+  tl.cex      = 0.7,
+  tl.col      = "black",
+  addCoef.col = "black",
+  number.cex  = 0.5,
+  title       = "Correlation Matrix – Numeric Variables (incl. geo medians)",
+  mar         = c(0, 0, 1.5, 0)
+)
+```
+---
+
+# Session Info
+
+```{r session-info}
+sessionInfo()
+```
