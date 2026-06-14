@@ -1,20 +1,6 @@
 # =============================================================
 #  PREDICCIÓN DE PRECIOS DE VIVIENDAS - Red Neuronal Multicapa
-#  (Multilayer Perceptron - MLP)  — VERSIÓN 2
-#
-#  Cambios respecto a la versión anterior:
-#    1. Fuente única: trainData.xlsx (X e y en un solo fichero)
-#    2. Agrupación en 3 tipos: appartement, maison, lujo
-#    3. Sin imputación: se eliminan todas las filas con nulos
-#    4. Indicador booleano has_energy_cert (sin imputar valores)
-#    5. Eliminación de variables con >50% nulos:
-#       exposition, floor, land_size, ghg_value, ghg_category
-#    6. Filtros de calidad: size [10, 5000 m²], price ≤ p99
-#    7. Filtro de escenarios imposibles: nb_bedrooms > nb_rooms
-#    8. Codificación por departamento (2 primeros dígitos del CP)
-#       Corse unificada como '20'; departamentos <100 anuncios eliminados
-#    9. Log-transform en size; log + StandardScaler en price
-#   10. Distancia a ciudades principales (haversine)
+#  (Multilayer Perceptron - MLP) 
 # =============================================================
 
 import os
@@ -27,12 +13,15 @@ from math import radians, sin, cos, sqrt, atan2
 from sklearn.neural_network import MLPRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import mean_absolute_error, r2_score
+from sklearn.metrics import mean_absolute_error, r2_score, mean_squared_error
+from diagnostics import mae_por_decil, plots_mlp
 
-# El primer dirname saca "Code", el segundo saca el directorio padre ("proyecto1_IIA")
 ruta = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+outputs_dir = os.path.join(ruta, "outputs")
+os.makedirs(outputs_dir, exist_ok=True)
 
 print(f"Ruta del proyecto: {ruta}\n")
+
 
 # ------------------------------------------------------------------
 # 1. CARGAR LOS DATOS
@@ -43,8 +32,11 @@ print("=== DATOS CARGADOS ===")
 print(f"Filas: {df.shape[0]}  |  Columnas: {df.shape[1]}")
 print(f"Precio medio inicial: {df['price'].mean():,.0f} €\n")
 
+
 # ------------------------------------------------------------------
 # 2. AGRUPAR TIPOS DE VIVIENDA EN 3 CATEGORÍAS Y FILTRAR
+#    Mapea los tipos originales a: appartement, maison, lujo.
+#    Las filas con tipos no mapeados se eliminan.
 # ------------------------------------------------------------------
 PROPERTY_TYPE_MAP = {
     "appartement": ["appartement", "duplex", "loft"],
@@ -54,11 +46,11 @@ PROPERTY_TYPE_MAP = {
 tipo_a_grupo = {t: g for g, ts in PROPERTY_TYPE_MAP.items() for t in ts}
 df["property_group"] = df["property_type"].map(tipo_a_grupo)
 
-# Drop unmapped types (divers, terrain, parking, viager, etc.)
 n_antes = len(df)
 df = df[df["property_group"].notna()].copy()
 print(f"Filas eliminadas por tipo no mapeado: {n_antes - len(df)}")
 print(df["property_group"].value_counts(), "\n")
+
 
 # ------------------------------------------------------------------
 # 3. ELIMINAR OUTLIERS DE PRECIO (percentil 99)
@@ -67,51 +59,73 @@ precio_p99 = df["price"].quantile(0.99)
 df = df[df["price"] <= precio_p99].copy()
 print(f"Precio máximo tras cap p99: {precio_p99:,.0f} €\n")
 
+
 # ------------------------------------------------------------------
-# 4. FILTRAR TAMAÑOS IMPOSIBLES
+# 4. FILTRAR TAMAÑOS E PRECIO/M² IMPOSIBLES
 # ------------------------------------------------------------------
 df = df[(df["size"] >= 10) & (df["size"] <= 5000)].copy()
 print(f"Filas tras filtro de size [10, 5000 m²]: {len(df)}\n")
 
+df["price_m2_temp"] = df["price"] / df["size"]
+n_antes = len(df)
+df = df[(df["price_m2_temp"] >= 300) & (df["price_m2_temp"] <= 20000)].copy()
+df = df.drop(columns=["price_m2_temp"])
+print(f"Filas tras filtro precio/m² [300–20.000]: {len(df)} "
+      f"(eliminadas {n_antes - len(df)})\n")
+
+
 # ------------------------------------------------------------------
-# 5. FILTRAR ESCENARIOS IMPOSIBLES EN VARIABLES NUMÉRICAS
+# 5. CODIFICACIÓN POR DEPARTAMENTO (2 primeros dígitos del CP)
+#    zfill(5) garantiza que códigos cortos (e.g. 9700 → 09700)
+#    se mapeen al departamento correcto (09, no 97).
+#    Córcega (2A/2B) se unifica como '20'.
+#    Departamentos con menos de 30 anuncios se eliminan.
 # ------------------------------------------------------------------
-# nb_bedrooms no puede superar nb_rooms
+df["dept"] = df["postal_code"].astype(str).str.zfill(5).str[:2]
+df["dept"] = df["dept"].replace({"2A": "20", "2B": "20"})
+
+dept_counts = df["dept"].value_counts()
+depts_validos = dept_counts[dept_counts >= 30].index
+df = df[df["dept"].isin(depts_validos)].copy()
+
+dept_to_int = {d: i for i, d in enumerate(sorted(df["dept"].unique()))}
+df["dept_enc"] = df["dept"].map(dept_to_int)
+df = df.drop(columns=["dept"])
+print(f"Departamentos conservados: {df['dept_enc'].nunique()}\n")
+
+
+# ------------------------------------------------------------------
+# 6. FILTRAR ESCENARIOS IMPOSIBLES EN VARIABLES NUMÉRICAS
+# ------------------------------------------------------------------
 df = df[~(df["nb_bedrooms"] > df["nb_rooms"])].copy()
 print(f"Filas tras eliminar nb_bedrooms > nb_rooms: {len(df)}\n")
 
+
 # ------------------------------------------------------------------
-# 6. INDICADOR BOOLEANO DE CERTIFICADO ENERGÉTICO
-#    energy_performance_category y ghg_value (~50% nulos):
-#    en lugar de imputar, se crea una bandera binaria.
-#    La ausencia del certificado suele indicar inmuebles antiguos.
+# 7. INDICADOR BOOLEANO DE CERTIFICADO ENERGÉTICO
+#    En lugar de imputar, se crean banderas binarias (has_energy_cert,
+#    has_ghg_value). La ausencia del certificado suele indicar
+#    inmuebles antiguos.
 # ------------------------------------------------------------------
 df["has_energy_cert"] = df["energy_performance_category"].notna().astype(int)
-df["has_ghg_value"] = df["ghg_value"].notna().astype(int)
-df = df.drop(columns=["energy_performance_category", "energy_performance_value", "ghg_value", "ghg_category"])
-
-# ------------------------------------------------------------------
-# 7. VARIABLES ELIMINADAS POR EXCESO DE NULOS (>50%)
-#    exposition (75.7%), floor (73.9%), land_size (58.3%),
-#    ghg_value (50.4%), ghg_category (50.4%)
-# ------------------------------------------------------------------
-COLS_ALTO_NULO = [
-    "exposition", "floor", "land_size", 'nb_bathrooms'
-]
-df = df.drop(columns=COLS_ALTO_NULO)
-
-
-
-# ------------------------------------------------------------------
-# 9. ELIMINAR COLUMNAS NO NECESARIAS
-# ------------------------------------------------------------------
+df["has_ghg_value"]   = df["ghg_value"].notna().astype(int)
 df = df.drop(columns=[
-    "id_annonce", "city", "postal_code",
-    "property_type",
+    "energy_performance_category", "energy_performance_value",
+    "ghg_value", "ghg_category",
 ])
 
+
 # ------------------------------------------------------------------
-# 10. ELIMINAR FILAS CON CUALQUIER NULO RESTANTE (sin imputación)
+# 8. ELIMINAR COLUMNAS CON >50% NULOS Y COLUMNAS NO NECESARIAS
+# ------------------------------------------------------------------
+COLS_ALTO_NULO = ["exposition", "floor", "land_size", "nb_bathrooms"]
+df = df.drop(columns=COLS_ALTO_NULO)
+
+df = df.drop(columns=["id_annonce", "city", "postal_code", "property_type"])
+
+
+# ------------------------------------------------------------------
+# 9. ELIMINAR FILAS CON NULOS RESTANTES (sin imputación)
 # ------------------------------------------------------------------
 n_antes = len(df)
 df = df.dropna()
@@ -119,8 +133,9 @@ print(f"Filas eliminadas por nulos restantes: {n_antes - len(df)}")
 print(f"Filas finales limpias: {len(df)}")
 print(f"Nulos totales: {df.isnull().sum().sum()}\n")
 
+
 # ------------------------------------------------------------------
-# 11. DISTANCIA A CIUDADES PRINCIPALES (km, haversine)
+# 10. DISTANCIA A CIUDADES PRINCIPALES (km, haversine)
 # ------------------------------------------------------------------
 CIUDADES = {
     "dist_paris":     (48.8566,  2.3522),
@@ -149,37 +164,35 @@ for nombre, (lat, lon) in CIUDADES.items():
     )
 df["dist_min_ciudad"] = df[[*CIUDADES]].min(axis=1)
 
+
 # ------------------------------------------------------------------
-# 12. LOG-TRANSFORM EN SIZE
+# 11. TRANSFORMACIONES DE VARIABLES
+#     log1p en size; coordenadas y size original se eliminan tras esto.
 # ------------------------------------------------------------------
 df["log_size"] = np.log1p(df["size"])
+df = df.drop(columns=["approximate_latitude", "approximate_longitude", "size"])
+
 
 # ------------------------------------------------------------------
-# 13. ONE-HOT ENCODING
+# 12. ONE-HOT ENCODING
 # ------------------------------------------------------------------
-df = pd.get_dummies(df, columns=["property_group"])
+df = pd.get_dummies(df, columns=["property_group", "dept_enc"])
+
 
 # ------------------------------------------------------------------
-# 14. ELIMINAR COORDENADAS Y SIZE ORIGINAL TRAS TRANSFORMACIÓN
+# 13. EXPORTAR DATOS PROCESADOS
 # ------------------------------------------------------------------
-df = df.drop(columns=[
-    "approximate_latitude", "approximate_longitude",
-    "size"
-])
+df.to_csv(os.path.join(ruta, "Data/datos_procesados_v2.csv"), index=False)
 
 print("=== VARIABLES USADAS EN EL MODELO ===")
 feature_cols = [c for c in df.columns if c != "price"]
 print(feature_cols)
 print(f"\nTotal variables: {len(feature_cols)}\n")
-
-# ------------------------------------------------------------------
-# 15. EXPORTAR DATOS PROCESADOS
-# ------------------------------------------------------------------
-df.to_csv(os.path.join(ruta, "Data/datos_procesados_v2.csv"), index=False)
 print("Datos exportados a Data/datos_procesados_v2.csv\n")
 
+
 # ------------------------------------------------------------------
-# 16. SEPARAR FEATURES Y OBJETIVO
+# 14. SEPARAR FEATURES Y OBJETIVO / TRAIN-TEST SPLIT
 # ------------------------------------------------------------------
 X_proc = df.drop(columns=["price"])
 y_proc = df["price"].values
@@ -189,22 +202,21 @@ X_train, X_test, y_train, y_test = train_test_split(
 )
 print(f"Train: {len(X_train)}  |  Test: {len(X_test)}\n")
 
+
 # ------------------------------------------------------------------
-# 17. ESCALAR FEATURES
+# 15. ESCALAR FEATURES Y PRECIO (log + StandardScaler)
 # ------------------------------------------------------------------
 scaler_X = StandardScaler()
 X_train_sc = scaler_X.fit_transform(X_train)
 X_test_sc  = scaler_X.transform(X_test)
 
-# ------------------------------------------------------------------
-# 18. ESCALAR EL PRECIO (log + StandardScaler)
-# ------------------------------------------------------------------
 y_train_log    = np.log1p(y_train)
 scaler_y       = StandardScaler()
 y_train_scaled = scaler_y.fit_transform(y_train_log.reshape(-1, 1)).ravel()
 
+
 # ------------------------------------------------------------------
-# 19. ENTRENAR LA RED NEURONAL
+# 16. ENTRENAR LA RED NEURONAL
 # ------------------------------------------------------------------
 modelo = MLPRegressor(
     hidden_layer_sizes=(128, 64),
@@ -225,8 +237,9 @@ print("=== ENTRENANDO LA RED NEURONAL ===")
 modelo.fit(X_train_sc, y_train_scaled)
 print()
 
+
 # ------------------------------------------------------------------
-# 20. EVALUAR EL MODELO
+# 17. EVALUAR EL MODELO
 # ------------------------------------------------------------------
 y_pred_scaled = modelo.predict(X_test_sc)
 y_pred_log    = scaler_y.inverse_transform(y_pred_scaled.reshape(-1, 1)).ravel()
@@ -234,16 +247,19 @@ y_pred        = np.expm1(y_pred_log)
 y_pred        = np.clip(y_pred, df["price"].min(), df["price"].max())
 
 mae = mean_absolute_error(y_test, y_pred)
+rsme = np.sqrt(np.mean((y_test - y_pred) ** 2))
 r2  = r2_score(y_test, y_pred)
 
 print("=== RESULTADOS ===")
 print(f"MAE  (Error Absoluto Medio) : {mae:,.0f} €")
 print(f"  → En promedio, nos equivocamos en {mae:,.0f} € por vivienda")
+print(f"RMSE (Error Cuadrático Medio) : {rsme:,.0f} €")
 print(f"R²   (Coeficiente de determinación): {r2:.4f}")
 print(f"  → El modelo explica el {r2*100:.1f}% de la variación en precios")
 
+
 # ------------------------------------------------------------------
-# 21. GRÁFICAS
+# 18. GRÁFICAS Y EXPORTACIÓN DE RESULTADOS
 # ------------------------------------------------------------------
 fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 fig.suptitle("Red Neuronal Multicapa - Predicción de Precios (v2)", fontsize=14)
@@ -268,14 +284,29 @@ ax2.set_title("Curva de Aprendizaje")
 ax2.legend()
 
 plt.tight_layout()
-plt.savefig(os.path.join(ruta, "resultados_mlp_v2.png"), dpi=150)
+plt.savefig(os.path.join(outputs_dir, "resultados_mlp_v2.png"), dpi=150)
 plt.show()
-print("\nGráfica guardada como 'resultados_mlp_v2.png'")
+print("\nGráfica guardada en outputs/resultados_mlp_v2.png")
 
-joblib.dump(scaler_X,          'models_pkl/mlp_scaler_X.pkl')
-joblib.dump(scaler_y,          'models_pkl/mlp_scaler_y.pkl')
-joblib.dump(list(X_proc.columns), 'models_pkl/mlp_feature_cols.pkl')
+joblib.dump(scaler_X,             os.path.join(outputs_dir, "mlp_scaler_X.pkl"))
+joblib.dump(scaler_y,             os.path.join(outputs_dir, "mlp_scaler_y.pkl"))
+joblib.dump(list(X_proc.columns), os.path.join(outputs_dir, "mlp_feature_cols.pkl"))
 
-os.makedirs('outputs', exist_ok=True)
-pd.DataFrame([{"RMSE": mae, "MAE": mae, "R2": r2}]).to_csv('outputs/metrics_mlp.csv', index=False)
-pd.DataFrame({"y_real": y_test, "y_pred": y_pred}).to_csv('outputs/predictions_mlp.csv', index=False)
+pd.DataFrame([{
+    "RMSE": np.sqrt(mean_squared_error(y_test, y_pred)),
+    "MAE":  mae,
+    "R2":   r2,
+}]).to_csv(os.path.join(outputs_dir, "metrics_mlp.csv"), index=False)
+
+pd.DataFrame({
+    "y_real": y_test,
+    "y_pred": y_pred,
+}).to_csv(os.path.join(outputs_dir, "predictions_mlp.csv"), index=False)
+
+plots_mlp(
+    y_test, y_pred,
+    out_dir=outputs_dir,
+    modelo=modelo,
+    nombre="Perceptrón Multicapa (MLP)",
+)
+mae_por_decil(y_test, y_pred)
