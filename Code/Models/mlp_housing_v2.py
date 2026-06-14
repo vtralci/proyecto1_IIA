@@ -288,9 +288,9 @@ plt.savefig(os.path.join(outputs_dir, "resultados_mlp_v2.png"), dpi=150)
 plt.show()
 print("\nGráfica guardada en outputs/resultados_mlp_v2.png")
 
-joblib.dump(scaler_X,             os.path.join(outputs_dir, "mlp_scaler_X.pkl"))
-joblib.dump(scaler_y,             os.path.join(outputs_dir, "mlp_scaler_y.pkl"))
-joblib.dump(list(X_proc.columns), os.path.join(outputs_dir, "mlp_feature_cols.pkl"))
+joblib.dump(scaler_X,             os.path.join(ruta, 'models_pkl', "mlp_scaler_X.pkl"))
+joblib.dump(scaler_y,             os.path.join(ruta, 'models_pkl', "mlp_scaler_y.pkl"))
+joblib.dump(list(X_proc.columns), os.path.join(ruta, 'models_pkl', "mlp_feature_cols.pkl"))
 
 pd.DataFrame([{
     "RMSE": np.sqrt(mean_squared_error(y_test, y_pred)),
