@@ -336,7 +336,7 @@ y_pred_log_clean, y_pred_clean = evaluar("MODELO SIN OUTLIERS", modelo_clean, X_
 # ------------------------------------------------------------------
 # 18. GUARDAR MODELO, PREDICCIONES Y MÉTRICAS
 # ------------------------------------------------------------------
-joblib.dump(modelo_clean, os.path.join(OUT_DIR, "linear_regression.pkl"))
+joblib.dump(modelo_clean, os.path.join(ROOT, 'models_pkl', "linear_regression.pkl"))
 
 pd.DataFrame({
     "y_real":        y_test,
